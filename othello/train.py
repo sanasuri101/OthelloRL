@@ -340,6 +340,11 @@ def train(
     parser.add_argument(
         "--load_checkpoint", type=str, default=None, help="Resume from checkpoint"
     )
+    parser.add_argument("--wandb", action="store_true", default=False,
+                        help="Enable wandb logging")
+    parser.add_argument("--wandb_project", type=str, default="othello-rl")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_run_name", type=str, default=None)
     known, remainder = parser.parse_known_args()
 
     cfg = _load_config(config_path or known.config)
@@ -376,6 +381,11 @@ def train(
 
     hidden_size = cfg.getint("policy", "hidden_size")
 
+    use_wandb = known.wandb
+    wandb_project = known.wandb_project
+    wandb_entity = known.wandb_entity
+    wandb_run_name = known.wandb_run_name or f"{exp_name}_{int(time.time())}"
+
     # ------------------------------------------------------------------
     # Reproducibility + device
     # ------------------------------------------------------------------
@@ -404,6 +414,44 @@ def train(
         f"batch={batch_size}  minibatches={num_minibatches}  "
         f"total_updates={total_updates}  device={device}"
     )
+
+    if use_wandb:
+        import wandb as _wandb
+        _wandb.init(
+            project=wandb_project,
+            entity=wandb_entity,
+            name=wandb_run_name,
+            config={
+                "num_envs": num_envs,
+                "total_timesteps": total_timesteps,
+                "learning_rate": lr,
+                "gamma": gamma,
+                "gae_lambda": gae_lambda,
+                "update_epochs": update_epochs,
+                "clip_coef": clip_coef,
+                "vf_coef": vf_coef,
+                "ent_coef": ent_coef,
+                "max_grad_norm": max_grad_norm,
+                "bptt_horizon": bptt_horizon,
+                "minibatch_size": minibatch_size,
+                "hidden_size": hidden_size,
+                "seed": seed,
+            },
+        )
+        # When running as a wandb sweep agent, override config with injected values
+        for key, value in _wandb.config.items():
+            if "." in str(key):
+                section, name = str(key).split(".", 1)
+                name = name.replace("-", "_")
+                if cfg.has_section(section):
+                    cfg.set(section, name, str(value))
+        # Re-parse sweep-affected values
+        lr = float(cfg.get("train", "learning_rate"))
+        gamma = float(cfg.get("train", "gamma"))
+        gae_lambda = float(cfg.get("train", "gae_lambda"))
+        ent_coef = float(cfg.get("train", "ent_coef"))
+        bptt_horizon = cfg.getint("train", "bptt_horizon")
+        hidden_size = cfg.getint("policy", "hidden_size")
 
     # ------------------------------------------------------------------
     # Curriculum — uses the real CurriculumScheduler API
@@ -511,11 +559,26 @@ def train(
 
                 action_np = action.cpu().numpy().astype(np.int32)
                 if opp_type == "self_play" and snapshot_policy is not None:
-                    obs_np, rew_np, term_np, trunc_np, _ = _rollout_step_selfplay(
+                    obs_np, rew_np, term_np, trunc_np, step_infos = _rollout_step_selfplay(
                         env, action_np, snapshot_policy, snap_lstm_state, device
                     )
                 else:
-                    obs_np, rew_np, term_np, trunc_np, _ = env.step(action_np)
+                    obs_np, rew_np, term_np, trunc_np, step_infos = env.step(action_np)
+
+                if use_wandb and step_infos:
+                    import wandb as _wandb
+                    info = step_infos[0]
+                    total_games = info.get("total_games", 0)
+                    if total_games > 0:
+                        _wandb.log(
+                            {
+                                "episode/win_rate": info.get("total_wins", 0) / total_games,
+                                "episode/length": info.get("total_moves", 0) / total_games,
+                                "episode/invalid_moves": info.get("total_invalid_moves", 0) / total_games,
+                                "episode/corner_captures": info.get("total_corner_captures", 0) / total_games,
+                            },
+                            step=global_step,
+                        )
 
                 rollout.rewards[step] = torch.tensor(
                     rew_np, dtype=torch.float32, device=device
@@ -596,7 +659,7 @@ def train(
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+                grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
                 optimizer.step()
 
                 last_loss = loss.item()
@@ -610,15 +673,34 @@ def train(
             sps = (global_step - step_start) / max(elapsed, 1e-9)
             step_start = global_step
             wall_start = time.time()
+            mean_clip = float(np.mean(clip_fracs)) if clip_fracs else float("nan")
             print(
                 f"[{global_step:>10}/{total_timesteps}] "
                 f"update={update + 1}/{total_updates}  "
                 f"loss={last_loss:.4f}  pg={last_pg:.4f}  "
                 f"vf={last_vf:.4f}  ent={last_ent:.4f}  "
-                f"clip={np.mean(clip_fracs):.3f}  "
+                f"clip={mean_clip:.3f}  "
                 f"phase={opp_type}(d={opp_depth})  "
                 f"SPS={sps:.0f}"
             )
+            if use_wandb:
+                import wandb as _wandb
+                _phase_idx = {"random": 0, "negamax": 1, "self_play": 5}.get(opp_type, 1)
+                _wandb.log(
+                    {
+                        "loss/total": last_loss,
+                        "loss/policy": last_pg,
+                        "loss/value": last_vf,
+                        "loss/entropy": last_ent,
+                        "train/clip_fraction": mean_clip,
+                        "train/learning_rate": optimizer.param_groups[0]["lr"],
+                        "train/sps": sps,
+                        "train/grad_norm": float(grad_norm) if "grad_norm" in dir() else 0.0,
+                        "curriculum/phase": _phase_idx,
+                        "curriculum/opp_depth": opp_depth,
+                    },
+                    step=global_step,
+                )
 
         # ---- Checkpoint ----------------------------------------------
         if (update + 1) % checkpoint_interval == 0:
@@ -632,6 +714,15 @@ def train(
                 str(path),
             )
             print(f"  → saved {path}")
+            if use_wandb:
+                import wandb as _wandb
+                artifact = _wandb.Artifact(
+                    name=f"{exp_name}_checkpoint",
+                    type="model",
+                    metadata={"global_step": global_step, "update": update + 1},
+                )
+                artifact.add_file(str(path))
+                _wandb.log_artifact(artifact)
 
     # ---- Final checkpoint -------------------------------------------
     final_path = ckpt_dir / "checkpoint_final.pt"
@@ -644,6 +735,9 @@ def train(
         str(final_path),
     )
     print(f"\n[Train] Complete. final checkpoint → {final_path}")
+    if use_wandb:
+        import wandb as _wandb
+        _wandb.finish()
     env.close()
 
 
