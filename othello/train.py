@@ -452,6 +452,10 @@ def train(
         ent_coef = float(cfg.get("train", "ent_coef"))
         bptt_horizon = cfg.getint("train", "bptt_horizon")
         hidden_size = cfg.getint("policy", "hidden_size")
+        # Recalculate derived batch dimensions in case bptt_horizon was swept
+        batch_size = num_envs * bptt_horizon
+        total_updates = total_timesteps // batch_size
+        num_minibatches = max(1, batch_size // minibatch_size)
 
     # ------------------------------------------------------------------
     # Curriculum — uses the real CurriculumScheduler API
@@ -620,6 +624,7 @@ def train(
         policy.train()
         clip_fracs: list[float] = []
         last_loss = last_pg = last_vf = last_ent = 0.0
+        grad_norm: float = 0.0
 
         for _ in range(update_epochs):
             perm = torch.randperm(batch_size, device=device)
@@ -695,7 +700,7 @@ def train(
                         "train/clip_fraction": mean_clip,
                         "train/learning_rate": optimizer.param_groups[0]["lr"],
                         "train/sps": sps,
-                        "train/grad_norm": float(grad_norm) if "grad_norm" in dir() else 0.0,
+                        "train/grad_norm": float(grad_norm),
                         "curriculum/phase": _phase_idx,
                         "curriculum/opp_depth": opp_depth,
                     },
