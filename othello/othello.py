@@ -51,6 +51,10 @@ class Othello(pufferlib.PufferEnv):
             num_envs, self.observations, self._c_actions, self._c_rewards, self._c_dones
         )
 
+        self._opp_obs = np.zeros((num_envs, binding.OBS_DIM), dtype=np.float32)
+        self._c_env.set_opp_obs(self._opp_obs)
+        self._c_opp_actions = np.zeros(num_envs, dtype=np.int32)
+
     def reset(self, seed=None):
         self._c_env.reset()
         return self.observations, []
@@ -66,6 +70,30 @@ class Othello(pufferlib.PufferEnv):
 
         self._step_count += 1
 
+        infos = []
+        if self._step_count % self.report_interval == 0:
+            log = self._c_env.log()
+            infos = [log]
+
+        return self.observations, self.rewards, self.terminals, self.truncations, infos
+
+    def step_agent(self, actions: np.ndarray) -> np.ndarray:
+        """Apply agent moves only; returns opponent obs buffer (view, not copy)."""
+        np.copyto(self._c_actions, actions.ravel()[: self.num_agents].astype(np.int32))
+        self._c_env.step_agent()
+        return self._opp_obs
+
+    def step_opponent(self, opp_actions: np.ndarray):
+        """Apply opponent moves and complete the step."""
+        np.copyto(self._c_opp_actions, opp_actions.ravel()[: self.num_agents].astype(np.int32))
+        self._c_env.step_opponent(self._c_opp_actions)
+
+        np.copyto(self.rewards, self._c_rewards)
+        np.copyto(self.terminals, self._c_dones.astype(bool))
+        self.truncations[:] = False
+        self.masks[:] = True
+
+        self._step_count += 1
         infos = []
         if self._step_count % self.report_interval == 0:
             log = self._c_env.log()

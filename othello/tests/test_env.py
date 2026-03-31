@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from othello import Othello
+from othello import binding
 
 
 class TestObservationSpace:
@@ -99,4 +100,34 @@ class TestMultipleEnvs:
         env = Othello(num_envs=4)
         obs, _ = env.reset()
         assert obs.shape == (4, 192)
+        env.close()
+
+
+class TestSplitStepEnv:
+    def test_step_agent_returns_opp_obs(self):
+        env = Othello(num_envs=2)
+        env.reset()
+        actions = np.zeros(2, dtype=np.int32)
+        for i in range(2):
+            legal = np.where(env.observations[i, 128:])[0]
+            actions[i] = int(legal[0])
+        opp_obs = env.step_agent(actions)
+        assert opp_obs.shape == (2, binding.OBS_DIM)
+        assert opp_obs.sum() > 0
+        env.close()
+
+    def test_step_opponent_completes_step(self):
+        env = Othello(num_envs=2)
+        env.reset()
+        actions = np.zeros(2, dtype=np.int32)
+        for i in range(2):
+            legal = np.where(env.observations[i, 128:])[0]
+            actions[i] = int(legal[0])
+        opp_obs = env.step_agent(actions)
+        opp_actions = np.zeros(2, dtype=np.int32)
+        for i in range(2):
+            opp_legal = np.where(opp_obs[i, 128:])[0]
+            opp_actions[i] = int(opp_legal[0]) if len(opp_legal) > 0 else 64
+        obs, rewards, terminals, truncations, infos = env.step_opponent(opp_actions)
+        assert obs.shape == (2, binding.OBS_DIM)
         env.close()
