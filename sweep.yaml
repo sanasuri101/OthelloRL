@@ -1,0 +1,35 @@
+program: othello/train.py
+method: bayes
+metric:
+  name: episode/win_rate
+  goal: maximize
+early_terminate:
+  type: hyperband
+  min_iter: 10
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --wandb
+  - --wandb_project
+  - othello-rl
+  - ${args}
+parameters:
+  train.learning_rate:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.01
+  train.gamma:
+    values: [0.99, 0.995, 0.999]
+  train.gae_lambda:
+    distribution: uniform
+    min: 0.9
+    max: 0.99
+  train.ent_coef:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.01
+  train.bptt_horizon:
+    values: [8, 16, 32]
+  policy.hidden_size:
+    values: [128, 256, 512]
