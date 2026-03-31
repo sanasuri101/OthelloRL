@@ -9,3 +9,6 @@ logs/
 TRASH/
 TRASH-FILES.md
 *.so
+wandb/
+othello/resources
+resources/
