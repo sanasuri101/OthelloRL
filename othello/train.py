@@ -386,6 +386,8 @@ def train(
     wandb_entity = known.wandb_entity
     wandb_run_name = known.wandb_run_name or f"{exp_name}_{int(time.time())}"
 
+    _wandb = None
+
     # ------------------------------------------------------------------
     # Reproducibility + device
     # ------------------------------------------------------------------
@@ -416,7 +418,8 @@ def train(
     )
 
     if use_wandb:
-        import wandb as _wandb
+        import wandb
+        _wandb = wandb
         _wandb.init(
             project=wandb_project,
             entity=wandb_entity,
@@ -511,6 +514,10 @@ def train(
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
+    snapshot_policy = None
+    snap_lstm_state = None
+    _last_snap_sd = None  # track last loaded state_dict by identity
+
     for update in range(start_update, total_updates):
 
         # ---- LR annealing --------------------------------------------
@@ -524,16 +531,15 @@ def train(
         opp_type = phase["type"]
         opp_depth = phase["depth"]
 
-        # Load/refresh snapshot policy for self-play
-        snapshot_policy = None
-        snap_lstm_state = None
+        # Load/refresh snapshot policy for self-play (only when snapshot changes)
         if opp_type == "self_play":
-            snap_state_dict = curriculum.self_play_pool.sample()
-            if snap_state_dict is not None:
+            snap_sd = curriculum.self_play_pool.sample()
+            if snap_sd is not None and snap_sd is not _last_snap_sd:
                 snapshot_policy = _load_snapshot_policy(
-                    snap_state_dict, env, hidden_size, device
+                    snap_sd, env, hidden_size, device
                 )
                 snap_lstm_state = _init_lstm_state(num_envs, hidden_size, device)
+                _last_snap_sd = snap_sd
 
         # ---- Rollout collection --------------------------------------
         policy.eval()
@@ -544,6 +550,9 @@ def train(
                     mask = done.bool()
                     lstm_state["lstm_h"][:, mask] = 0.0
                     lstm_state["lstm_c"][:, mask] = 0.0
+                    if snap_lstm_state is not None:
+                        snap_lstm_state["lstm_h"][:, mask] = 0.0
+                        snap_lstm_state["lstm_c"][:, mask] = 0.0
 
                 logits, value = policy.forward_eval(obs, lstm_state)
                 dist = Categorical(logits=logits)
@@ -569,17 +578,16 @@ def train(
                 else:
                     obs_np, rew_np, term_np, trunc_np, step_infos = env.step(action_np)
 
-                if use_wandb and step_infos:
-                    import wandb as _wandb
+                if step_infos:
                     info = step_infos[0]
-                    total_games = info.get("total_games", 0)
-                    if total_games > 0:
+                    games_played = info.get("games_played", 0)
+                    if games_played > 0 and _wandb is not None:
                         _wandb.log(
                             {
-                                "episode/win_rate": info.get("total_wins", 0) / total_games,
-                                "episode/length": info.get("total_moves", 0) / total_games,
-                                "episode/invalid_moves": info.get("total_invalid_moves", 0) / total_games,
-                                "episode/corner_captures": info.get("total_corner_captures", 0) / total_games,
+                                "episode/win_rate": info.get("win_rate", 0.0),
+                                "episode/length": info.get("avg_game_length", 0.0),
+                                "episode/invalid_moves": info.get("invalid_move_rate", 0.0),
+                                "episode/corner_captures": info.get("corner_captures", 0) / max(games_played, 1),
                             },
                             step=global_step,
                         )
@@ -598,6 +606,9 @@ def train(
                 mask = done.bool()
                 lstm_state["lstm_h"][:, mask] = 0.0
                 lstm_state["lstm_c"][:, mask] = 0.0
+                if snap_lstm_state is not None:
+                    snap_lstm_state["lstm_h"][:, mask] = 0.0
+                    snap_lstm_state["lstm_c"][:, mask] = 0.0
             _, last_value = policy.forward_eval(obs, lstm_state)
             last_value = last_value.squeeze(-1).detach()
 
@@ -688,9 +699,9 @@ def train(
                 f"phase={opp_type}(d={opp_depth})  "
                 f"SPS={sps:.0f}"
             )
-            if use_wandb:
-                import wandb as _wandb
-                _phase_idx = {"random": 0, "negamax": 1, "self_play": 5}.get(opp_type, 1)
+            if _wandb is not None:
+                # Phase index: 0=random, 1-4=negamax depths 1-5, 5=self_play (6 phases total)
+                _phase_idx = {"random": 0, "negamax": 1, "self_play": 5}.get(opp_type, 0)
                 _wandb.log(
                     {
                         "loss/total": last_loss,
@@ -719,8 +730,7 @@ def train(
                 str(path),
             )
             print(f"  → saved {path}")
-            if use_wandb:
-                import wandb as _wandb
+            if _wandb is not None:
                 artifact = _wandb.Artifact(
                     name=f"{exp_name}_checkpoint",
                     type="model",
@@ -740,8 +750,7 @@ def train(
         str(final_path),
     )
     print(f"\n[Train] Complete. final checkpoint → {final_path}")
-    if use_wandb:
-        import wandb as _wandb
+    if _wandb is not None:
         _wandb.finish()
     env.close()
 
