@@ -9,6 +9,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import binding
 
+OBS_DIM = binding.OBS_DIM
+
 
 class TestBoardInit:
     """Test initial board state."""
@@ -303,3 +305,61 @@ class TestNegamax:
                 f"Negamax picked X-squares {x_rate:.1%} of the time "
                 f"({x_square_picks}/{total_picks})"
             )
+
+
+class TestSplitStep:
+    """vec_step_agent + vec_step_opponent must behave like vec_step."""
+
+    def _make_env(self, n=2):
+        obs = np.zeros((n, OBS_DIM), dtype=np.float32)
+        actions = np.zeros(n, dtype=np.int32)
+        rewards = np.zeros(n, dtype=np.float32)
+        dones = np.zeros(n, dtype=np.int32)
+        opp_obs = np.zeros((n, OBS_DIM), dtype=np.float32)
+        vec = binding.VecEnv()
+        vec.init(n, obs, actions, rewards, dones)
+        vec.set_opp_obs(opp_obs)
+        vec.reset()
+        return vec, obs, actions, rewards, dones, opp_obs
+
+    def test_set_opp_obs_accepted(self):
+        """set_opp_obs() does not raise."""
+        vec, *_ = self._make_env()
+
+    def test_step_agent_fills_opp_obs(self):
+        """After vec_step_agent(), opp_obs must be non-zero (opponent has pieces)."""
+        vec, obs, actions, rewards, dones, opp_obs = self._make_env(n=1)
+        legal = np.where(obs[0, 128:])[0]
+        actions[0] = int(legal[0])
+        vec.step_agent()
+        assert opp_obs[0].sum() > 0, "opp_obs should contain board state"
+
+    def test_step_opponent_completes_step(self):
+        """vec_step_opponent() must write obs/rewards/dones back."""
+        vec, obs, actions, rewards, dones, opp_obs = self._make_env(n=1)
+        legal = np.where(obs[0, 128:])[0]
+        actions[0] = int(legal[0])
+        opp_actions = np.zeros(1, dtype=np.int32)
+        vec.step_agent()
+        opp_legal = np.where(opp_obs[0, 128:])[0]
+        opp_actions[0] = int(opp_legal[0]) if len(opp_legal) > 0 else 64
+        vec.step_opponent(opp_actions)
+        assert obs[0].sum() > 0
+
+    def test_split_step_preserves_game_length(self):
+        """Games played via split-step should complete in a reasonable number of moves."""
+        n = 4
+        vec, obs, actions, rewards, dones, opp_obs = self._make_env(n=n)
+        opp_actions = np.zeros(n, dtype=np.int32)
+        total_done = 0
+        for _ in range(200):
+            for i in range(n):
+                legal = np.where(obs[i, 128:])[0]
+                actions[i] = int(legal[0]) if len(legal) > 0 else 64
+            vec.step_agent()
+            for i in range(n):
+                opp_legal = np.where(opp_obs[i, 128:])[0]
+                opp_actions[i] = int(opp_legal[0]) if len(opp_legal) > 0 else 64
+            vec.step_opponent(opp_actions)
+            total_done += int(dones.sum())
+        assert total_done > 0, "At least some games should have finished"

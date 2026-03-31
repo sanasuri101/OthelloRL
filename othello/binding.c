@@ -17,6 +17,7 @@ typedef struct {
     int **action_ptrs;
     float **reward_ptrs;
     int **done_ptrs;
+    float **opp_obs_ptrs;  // opponent observation buffer, set by set_opp_obs()
     // Stats accumulators
     int total_wins;
     int total_games;
@@ -31,6 +32,7 @@ static void VecEnv_dealloc(VecEnv *self) {
     if (self->action_ptrs) free(self->action_ptrs);
     if (self->reward_ptrs) free(self->reward_ptrs);
     if (self->done_ptrs) free(self->done_ptrs);
+    if (self->opp_obs_ptrs) free(self->opp_obs_ptrs);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -44,6 +46,7 @@ static PyObject *VecEnv_new(PyTypeObject *type, PyObject *args, PyObject *kwds) 
         self->action_ptrs = NULL;
         self->reward_ptrs = NULL;
         self->done_ptrs = NULL;
+        self->opp_obs_ptrs = NULL;
         self->total_wins = 0;
         self->total_games = 0;
         self->total_invalid_moves = 0;
@@ -123,6 +126,25 @@ static PyObject *vec_reset(VecEnv *self, PyObject *args) {
             }
             oth_write_obs(&self->envs[i], self->obs_ptrs[i], agent_color);
         }
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_set_opp_obs(VecEnv *self, PyObject *args) {
+    PyObject *opp_obs_arr;
+    if (!PyArg_ParseTuple(args, "O", &opp_obs_arr)) return NULL;
+
+    if (self->opp_obs_ptrs) {
+        free(self->opp_obs_ptrs);
+    }
+    self->opp_obs_ptrs = (float **)calloc(self->num_envs, sizeof(float *));
+    if (!self->opp_obs_ptrs) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate opp_obs_ptrs");
+        return NULL;
+    }
+    float *base = (float *)PyArray_DATA((PyArrayObject *)opp_obs_arr);
+    for (int i = 0; i < self->num_envs; i++) {
+        self->opp_obs_ptrs[i] = base + i * OTH_OBS_DIM;
     }
     Py_RETURN_NONE;
 }
@@ -264,6 +286,134 @@ static PyObject *vec_step(VecEnv *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *vec_step_agent(VecEnv *self, PyObject *args) {
+    (void)args;
+    for (int i = 0; i < self->num_envs; i++) {
+        Othello *g = &self->envs[i];
+        int agent_color = g->episode_id % 2;
+
+        // Auto-reset if done (same logic as vec_step)
+        if (g->done) {
+            self->total_games++;
+            self->total_moves += g->move_count;
+            self->total_invalid_moves += g->invalid_moves;
+            self->total_corner_captures += g->corner_captures;
+            float terminal_reward = g->reward;
+            if (agent_color == OTH_WHITE) terminal_reward = -terminal_reward;
+            if (terminal_reward > 0) self->total_wins++;
+
+            oth_reset(g);
+            g->episode_id++;
+            agent_color = g->episode_id % 2;
+
+            if (agent_color == OTH_WHITE) {
+                play_random_opponent(g, OTH_BLACK);
+                if (oth_check_terminal(g)) {
+                    oth_write_obs(g, self->obs_ptrs[i], agent_color);
+                    *self->reward_ptrs[i] = (agent_color == OTH_WHITE) ? -g->reward : g->reward;
+                    *self->done_ptrs[i] = 1;
+                    if (self->opp_obs_ptrs)
+                        oth_write_obs(g, self->opp_obs_ptrs[i], 1 - agent_color);
+                    continue;
+                }
+            }
+            oth_write_obs(g, self->obs_ptrs[i], agent_color);
+            *self->reward_ptrs[i] = 0.0f;
+            *self->done_ptrs[i] = 0;
+            if (self->opp_obs_ptrs)
+                oth_write_obs(g, self->opp_obs_ptrs[i], 1 - agent_color);
+            continue;
+        }
+
+        int action = *self->action_ptrs[i];
+        int terminal = oth_step_agent(g, action, agent_color);
+
+        if (terminal) {
+            float r = g->reward;
+            if (agent_color == OTH_WHITE) r = -r;
+            oth_write_obs(g, self->obs_ptrs[i], agent_color);
+            *self->reward_ptrs[i] = r;
+            *self->done_ptrs[i] = 1;
+            if (self->opp_obs_ptrs)
+                oth_write_obs(g, self->opp_obs_ptrs[i], 1 - agent_color);
+            continue;
+        }
+
+        // Write opponent's view into opp_obs so Python can pick the move
+        if (self->opp_obs_ptrs) {
+            oth_write_obs(g, self->opp_obs_ptrs[i], 1 - agent_color);
+        }
+        *self->done_ptrs[i] = 0;
+        *self->reward_ptrs[i] = 0.0f;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_step_opponent(VecEnv *self, PyObject *args) {
+    PyObject *opp_actions_arr;
+    if (!PyArg_ParseTuple(args, "O", &opp_actions_arr)) return NULL;
+    int *opp_acts = (int *)PyArray_DATA((PyArrayObject *)opp_actions_arr);
+
+    for (int i = 0; i < self->num_envs; i++) {
+        Othello *g = &self->envs[i];
+        // Skip envs that already terminated in step_agent
+        if (g->done || *self->done_ptrs[i] == 1) {
+            oth_write_obs(g, self->obs_ptrs[i], g->episode_id % 2);
+            continue;
+        }
+
+        int agent_color = g->episode_id % 2;
+        int opp_color = 1 - agent_color;
+
+        int opp_action = opp_acts[i];
+        uint64_t opp_board = (opp_color == OTH_BLACK) ? g->black : g->white;
+        uint64_t my_board  = (opp_color == OTH_BLACK) ? g->white : g->black;
+        uint64_t opp_moves = oth_get_moves(opp_board, my_board);
+
+        if (opp_moves == 0) {
+            oth_apply_move(g, OTH_ACTION_PASS);
+        } else {
+            if (opp_action < 64 && ((opp_moves >> opp_action) & 1)) {
+                oth_apply_move(g, opp_action);
+            } else {
+                for (int b = 0; b < 64; b++) {
+                    if ((opp_moves >> b) & 1) { oth_apply_move(g, b); break; }
+                }
+            }
+        }
+
+        if (oth_check_terminal(g)) {
+            float r = g->reward;
+            if (agent_color == OTH_WHITE) r = -r;
+            oth_write_obs(g, self->obs_ptrs[i], agent_color);
+            *self->reward_ptrs[i] = r;
+            *self->done_ptrs[i] = 1;
+            continue;
+        }
+
+        // Auto-pass agent if no moves
+        uint64_t agent_board = (agent_color == OTH_BLACK) ? g->black : g->white;
+        uint64_t enemy_board = (agent_color == OTH_BLACK) ? g->white : g->black;
+        uint64_t agent_moves = oth_get_moves(agent_board, enemy_board);
+        if (agent_moves == 0) {
+            oth_apply_move(g, OTH_ACTION_PASS);
+            if (oth_check_terminal(g)) {
+                float r = g->reward;
+                if (agent_color == OTH_WHITE) r = -r;
+                oth_write_obs(g, self->obs_ptrs[i], agent_color);
+                *self->reward_ptrs[i] = r;
+                *self->done_ptrs[i] = 1;
+                continue;
+            }
+        }
+
+        oth_write_obs(g, self->obs_ptrs[i], agent_color);
+        *self->reward_ptrs[i] = 0.0f;
+        *self->done_ptrs[i] = 0;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *vec_close(VecEnv *self, PyObject *args) {
     (void)args;
     if (self->envs) {
@@ -375,6 +525,9 @@ static PyMethodDef VecEnv_methods[] = {
     {"render_should_close", (PyCFunction)vec_render_should_close, METH_NOARGS, "Check render close"},
     {"render_get_click", (PyCFunction)vec_render_get_click, METH_NOARGS, "Get render click"},
     {"render", (PyCFunction)vec_render, METH_VARARGS, "Render environment"},
+    {"set_opp_obs",   (PyCFunction)vec_set_opp_obs,   METH_VARARGS, "Set opponent obs buffer"},
+    {"step_agent",    (PyCFunction)vec_step_agent,    METH_NOARGS,  "Apply agent moves only"},
+    {"step_opponent", (PyCFunction)vec_step_opponent, METH_VARARGS, "Apply opponent moves and complete step"},
     {NULL, NULL, 0, NULL}
 };
 
