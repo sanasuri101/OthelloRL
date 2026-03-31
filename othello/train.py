@@ -202,6 +202,32 @@ def make_policy(env, hidden_size: int = 256) -> OthelloPolicy:
     return OthelloPolicy(env, hidden_size=hidden_size)
 
 
+def _load_snapshot_policy(
+    state_dict: dict, env, hidden_size: int, device: torch.device
+) -> OthelloPolicy:
+    """Instantiate a policy and load a state_dict from the self-play pool."""
+    snap = make_policy(env, hidden_size=hidden_size).to(device)
+    snap.load_state_dict(state_dict)
+    snap.eval()
+    return snap
+
+
+def _rollout_step_selfplay(
+    env,
+    agent_actions: np.ndarray,
+    snapshot_policy,
+    snap_lstm: Dict[str, torch.Tensor],
+    device: torch.device,
+) -> tuple:
+    """One split-step using the snapshot policy as opponent."""
+    opp_obs_np = env.step_agent(agent_actions)
+    opp_obs_t = torch.tensor(opp_obs_np, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        opp_logits, _ = snapshot_policy.forward_eval(opp_obs_t, snap_lstm)
+    opp_actions = opp_logits.argmax(dim=-1).cpu().numpy().astype(np.int32)
+    return env.step_opponent(opp_actions)
+
+
 # ---------------------------------------------------------------------------
 # LSTM state helpers
 # ---------------------------------------------------------------------------
@@ -446,6 +472,17 @@ def train(
         opp_type = phase["type"]
         opp_depth = phase["depth"]
 
+        # Load/refresh snapshot policy for self-play
+        snapshot_policy = None
+        snap_lstm_state = None
+        if opp_type == "self_play":
+            snap_state_dict = curriculum.self_play_pool.sample()
+            if snap_state_dict is not None:
+                snapshot_policy = _load_snapshot_policy(
+                    snap_state_dict, env, hidden_size, device
+                )
+                snap_lstm_state = _init_lstm_state(num_envs, hidden_size, device)
+
         # ---- Rollout collection --------------------------------------
         policy.eval()
         with torch.no_grad():
@@ -473,7 +510,12 @@ def train(
                 )
 
                 action_np = action.cpu().numpy().astype(np.int32)
-                obs_np, rew_np, term_np, trunc_np, _ = env.step(action_np)
+                if opp_type == "self_play" and snapshot_policy is not None:
+                    obs_np, rew_np, term_np, trunc_np, _ = _rollout_step_selfplay(
+                        env, action_np, snapshot_policy, snap_lstm_state, device
+                    )
+                else:
+                    obs_np, rew_np, term_np, trunc_np, _ = env.step(action_np)
 
                 rollout.rewards[step] = torch.tensor(
                     rew_np, dtype=torch.float32, device=device
