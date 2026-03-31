@@ -1,0 +1,7 @@
+.superpowers/
+*.so
+*.dylib
+__pycache__/
+*.egg-info/
+experiments/
+logs/
