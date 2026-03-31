@@ -513,6 +513,25 @@ static PyObject *vec_render(VecEnv *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *vec_negamax_moves_batch(VecEnv *self, PyObject *args) {
+    PyObject *actions_obj;
+    int depth;
+    if (!PyArg_ParseTuple(args, "Oi", &actions_obj, &depth))
+        return NULL;
+
+    int *actions_ptr = (int *)PyArray_DATA((PyArrayObject *)actions_obj);
+    for (int i = 0; i < self->num_envs; i++) {
+        Othello *g = &self->envs[i];
+        if (!g->done) {
+            int color = g->current_player;
+            actions_ptr[i] = neg_best_move(g, color, depth);
+        } else {
+            actions_ptr[i] = 0;  /* done env — value ignored by step_opponent */
+        }
+    }
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef VecEnv_methods[] = {
     {"init", (PyCFunction)vec_init, METH_VARARGS, "Initialize environments"},
     {"reset", (PyCFunction)vec_reset, METH_NOARGS, "Reset all environments"},
@@ -528,6 +547,7 @@ static PyMethodDef VecEnv_methods[] = {
     {"set_opp_obs",   (PyCFunction)vec_set_opp_obs,   METH_VARARGS, "Set opponent obs buffer"},
     {"step_agent",    (PyCFunction)vec_step_agent,    METH_NOARGS,  "Apply agent moves only"},
     {"step_opponent", (PyCFunction)vec_step_opponent, METH_VARARGS, "Apply opponent moves and complete step"},
+    {"negamax_moves_batch", (PyCFunction)vec_negamax_moves_batch, METH_VARARGS, "Fill buffer with negamax moves for all envs"},
     {NULL, NULL, 0, NULL}
 };
 

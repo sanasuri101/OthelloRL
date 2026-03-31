@@ -575,6 +575,10 @@ def train(
                     obs_np, rew_np, term_np, trunc_np, step_infos = _rollout_step_selfplay(
                         env, action_np, snapshot_policy, snap_lstm_state, device
                     )
+                elif opp_type == "negamax" and opp_depth > 0:
+                    obs_np, rew_np, term_np, trunc_np, step_infos = env.step_negamax(
+                        action_np, opp_depth
+                    )
                 else:
                     obs_np, rew_np, term_np, trunc_np, step_infos = env.step(action_np)
 

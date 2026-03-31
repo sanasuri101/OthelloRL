@@ -101,6 +101,12 @@ class Othello(pufferlib.PufferEnv):
 
         return self.observations, self.rewards, self.terminals, self.truncations, infos
 
+    def step_negamax(self, agent_actions: np.ndarray, depth: int):
+        """Apply agent moves then negamax opponent moves in one call."""
+        self.step_agent(agent_actions)
+        self._c_env.negamax_moves_batch(self._c_opp_actions, depth)
+        return self.step_opponent(self._c_opp_actions)
+
     def render(self):
         if self.render_mode == "human":
             self._c_env.render()
