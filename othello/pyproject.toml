@@ -1,0 +1,14 @@
+[project]
+name = "othello-rl"
+version = "0.1.0"
+description = "Othello RL environment for PufferLib"
+requires-python = ">=3.10"
+dependencies = [
+    "pufferlib>=3.0",
+    "gymnasium",
+    "numpy",
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
