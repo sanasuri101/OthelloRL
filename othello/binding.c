@@ -432,8 +432,10 @@ static PyObject *vec_log(VecEnv *self, PyObject *args) {
         (double)self->total_wins / self->total_games : 0.0;
     double avg_length = (self->total_games > 0) ?
         (double)self->total_moves / self->total_games : 0.0;
-    double invalid_rate = (self->total_moves > 0) ?
-        (double)self->total_invalid_moves / self->total_moves : 0.0;
+    /* invalid_move_rate = illegal-action terminations per game (fraction of games
+       that ended via an invalid move, not invalid moves per board placement) */
+    double invalid_rate = (self->total_games > 0) ?
+        (double)self->total_invalid_moves / self->total_games : 0.0;
 
     PyDict_SetItemString(dict, "win_rate", PyFloat_FromDouble(win_rate));
     PyDict_SetItemString(dict, "avg_game_length", PyFloat_FromDouble(avg_length));

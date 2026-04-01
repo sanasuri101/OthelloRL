@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.distributions import Categorical
 
 
 def evaluate(
@@ -76,7 +77,13 @@ def evaluate(
             # This is an intentional shared-state contract — callers must not cache the dict.
             with torch.no_grad():
                 logits, _ = policy.forward_eval(obs_t, lstm_state)
-            action = logits.argmax(dim=-1).cpu().numpy().astype(np.int32)
+            # Mask illegal actions using the legal-move plane (obs dims 128-191)
+            legal = obs_t[:, 128:192]
+            has_legal = legal.sum(dim=-1, keepdim=True) > 0
+            pass_legal = (~has_legal).float()
+            full_mask = torch.cat([legal, pass_legal], dim=-1)  # (B, 65)
+            masked_logits = logits.masked_fill(full_mask < 0.5, float("-inf"))
+            action = masked_logits.argmax(dim=-1).cpu().numpy().astype(np.int32)
 
             obs_np, rew_np, term_np, _trunc_np, _infos = env.step_negamax(action, depth)
 
