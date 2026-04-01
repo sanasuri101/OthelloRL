@@ -484,7 +484,13 @@ def train(
     # ------------------------------------------------------------------
     # Curriculum — uses the real CurriculumScheduler API
     # ------------------------------------------------------------------
-    curriculum = CurriculumScheduler(total_timesteps=total_timesteps)
+    self_play_pool_capacity = cfg.getint("curriculum", "self_play_pool_capacity", fallback=20)
+    self_play_refresh_interval = cfg.getint("curriculum", "self_play_refresh_interval", fallback=50_000)
+    curriculum = CurriculumScheduler(
+        total_timesteps=total_timesteps,
+        self_play_pool_capacity=self_play_pool_capacity,
+        self_play_refresh_interval=self_play_refresh_interval,
+    )
 
     # ------------------------------------------------------------------
     # Policy + optimiser
@@ -575,6 +581,15 @@ def train(
                         snap_lstm_state["lstm_h"][:, mask] = 0.0
                         snap_lstm_state["lstm_c"][:, mask] = 0.0
 
+                # Capture LSTM input state BEFORE forward_eval mutates it in-place.
+                # Storing the pre-call state ensures the PPO update re-enters the
+                # LSTM from the same hidden state used during rollout collection,
+                # so old_log_prob and new_log_prob are consistent (ratio ≈ 1 at
+                # epoch 0).  Storing the post-call state causes ratio ≠ 1 even
+                # for unchanged parameters, breaking the PPO clipping guarantee.
+                lstm_h_pre = lstm_state["lstm_h"].clone()
+                lstm_c_pre = lstm_state["lstm_c"].clone()
+
                 logits, value = policy.forward_eval(obs, lstm_state)
                 masked_logits = _apply_action_mask(logits, obs)
                 dist = Categorical(logits=masked_logits)
@@ -588,8 +603,8 @@ def train(
                     log_prob=log_prob,
                     done=done,
                     value=value.squeeze(-1),
-                    lstm_h=lstm_state["lstm_h"].clone(),
-                    lstm_c=lstm_state["lstm_c"].clone(),
+                    lstm_h=lstm_h_pre,
+                    lstm_c=lstm_c_pre,
                 )
 
                 action_np = action.cpu().numpy().astype(np.int32)

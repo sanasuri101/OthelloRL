@@ -45,10 +45,18 @@ class SelfPlayPool:
 
 
 class CurriculumScheduler:
-    def __init__(self, total_timesteps=200_000_000):
+    def __init__(
+        self,
+        total_timesteps=200_000_000,
+        self_play_pool_capacity=5,
+        self_play_refresh_interval=5_000_000,
+    ):
         self.total_timesteps = total_timesteps
         self.difficulty_value = multiprocessing.Value("f", 0.0)
-        self.self_play_pool = SelfPlayPool()
+        self.self_play_pool = SelfPlayPool(
+            max_size=self_play_pool_capacity,
+            refresh_interval=self_play_refresh_interval,
+        )
 
     def get_difficulty(self, global_step):
         return min(1.0, max(0.0, global_step / self.total_timesteps))
