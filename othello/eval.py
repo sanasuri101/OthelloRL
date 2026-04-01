@@ -46,6 +46,9 @@ def evaluate(
     if depths is None:
         depths = [1, 2, 3, 5]
 
+    if n_games <= 0:
+        raise ValueError(f"n_games must be >= 1, got {n_games}")
+
     hidden_size: int = policy.lstm_cell.hidden_size
     policy = policy.to(device)
     policy.eval()
@@ -64,15 +67,23 @@ def evaluate(
         games_done = 0
         wins = 0
 
+        max_steps = n_games * 120  # 60-square board, generous 2x headroom per game
+        total_steps = 0
+
         while games_done < n_games:
             obs_t = torch.tensor(obs_np, dtype=torch.float32, device=device)
             with torch.no_grad():
                 logits, _ = policy.forward_eval(obs_t, lstm_state)
             action = logits.argmax(dim=-1).cpu().numpy().astype(np.int32)
 
-            obs_np, rew_np, term_np, _trunc_np, _infos = env.step_negamax(
-                action, depth
-            )
+            obs_np, rew_np, term_np, _trunc_np, _infos = env.step_negamax(action, depth)
+
+            total_steps += 1
+            if total_steps > max_steps:
+                raise RuntimeError(
+                    f"evaluate() exceeded step budget ({max_steps} steps for {n_games} games "
+                    f"at depth {depth}). The environment may not be terminating."
+                )
 
             if term_np[0]:
                 games_done += 1
@@ -106,6 +117,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--n_games", type=int, default=100, help="Games per depth")
     parser.add_argument("--device", default="cpu", help="Torch device")
+    parser.add_argument("--hidden_size", type=int, default=256, help="Policy hidden size (must match checkpoint)")
     parser.add_argument("--wandb", action="store_true", help="Log results to wandb")
     parser.add_argument("--wandb_project", default="othello-rl")
     parser.add_argument("--wandb_run_name", default=None)
@@ -117,12 +129,11 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error: checkpoint not found: {ckpt_path}", file=sys.stderr)
         sys.exit(1)
 
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from othello.train import make_policy  # noqa: PLC0415
-    from othello.othello import Othello  # noqa: PLC0415
+    from othello.train import make_policy
+    from othello.othello import Othello
 
     _env = Othello(num_envs=1)
-    policy = make_policy(_env, hidden_size=256).to(args.device)
+    policy = make_policy(_env, hidden_size=args.hidden_size).to(args.device)
     _env.close()
 
     ckpt = torch.load(str(ckpt_path), map_location=args.device, weights_only=True)
