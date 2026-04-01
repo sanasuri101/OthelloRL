@@ -362,7 +362,7 @@ def train(
     )
     parser.add_argument("--wandb", action="store_true", default=False,
                         help="Enable wandb logging")
-    parser.add_argument("--wandb_project", type=str, default="othello-rl")
+    parser.add_argument("--wandb_project", type=str, default="Connect4RL-othello")
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--wandb_run_name", type=str, default=None)
     known, remainder = parser.parse_known_args()

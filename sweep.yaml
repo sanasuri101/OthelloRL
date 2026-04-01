@@ -15,11 +15,11 @@ early_terminate:
 #   - Eval every 500k steps so hyperband has enough signal to prune early
 command:
   - ${env}
-  - python
+  - /Users/openclaw/Code/Connect4RL/.venv/bin/python
   - ${program}
   - --wandb
   - --wandb_project
-  - othello-rl
+  - Connect4RL-othello
   - --train.total_timesteps
   - "10000000"
   - --train.eval_interval
