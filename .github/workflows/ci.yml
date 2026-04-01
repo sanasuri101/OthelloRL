@@ -21,7 +21,7 @@ jobs:
 
       - name: Install Python dependencies
         working-directory: othello
-        run: uv sync
+        run: uv sync --extra dev
 
       - name: Build C extension
         working-directory: othello
