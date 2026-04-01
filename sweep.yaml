@@ -1,11 +1,18 @@
 program: othello/train.py
 method: bayes
 metric:
-  name: episode/win_rate
+  name: eval/win_rate_vs_negamax_d3
   goal: maximize
+
 early_terminate:
   type: hyperband
-  min_iter: 10
+  min_iter: 3        # wait for at least 3 eval checkpoints before pruning
+  eta: 2             # halve the remaining trials each round
+
+# Fixed overrides for every sweep trial:
+#   - Short 10M runs so Bayes can try many configs quickly (~15 min each on CPU)
+#   - Skip negamax d5 (37x slower, causes overfitting) — jump d3 → self_play
+#   - Eval every 500k steps so hyperband has enough signal to prune early
 command:
   - ${env}
   - python
@@ -13,23 +20,37 @@ command:
   - --wandb
   - --wandb_project
   - othello-rl
+  - --train.total_timesteps
+  - "10000000"
+  - --train.eval_interval
+  - "500000"
+  - --curriculum.phase_4_fraction
+  - "0.60"
+  - --curriculum.phase_5_fraction
+  - "0.60"
   - ${args}
+
 parameters:
+  train.ent_coef:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.10          # we know 0.005 and 0.01 both collapse — explore higher
+
   train.learning_rate:
     distribution: log_uniform_values
     min: 0.0001
-    max: 0.01
+    max: 0.003
+
+  train.bptt_horizon:
+    values: [16, 32]   # 8 is too short for a 30-move game
+
   train.gamma:
     values: [0.99, 0.995, 0.999]
+
   train.gae_lambda:
     distribution: uniform
-    min: 0.9
+    min: 0.90
     max: 0.99
-  train.ent_coef:
-    distribution: log_uniform_values
-    min: 0.0001
-    max: 0.01
-  train.bptt_horizon:
-    values: [8, 16, 32]
+
   policy.hidden_size:
     values: [128, 256, 512]

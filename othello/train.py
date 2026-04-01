@@ -516,6 +516,10 @@ def train(
     policy = make_policy(env, hidden_size=hidden_size).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=lr, eps=1e-5)
 
+    # Track gradient norms and weight distributions — catches entropy collapse early
+    if _wandb is not None:
+        _wandb.watch(policy, log="all", log_freq=1000)
+
     global_step = 0
     start_update = 0
 
@@ -562,6 +566,9 @@ def train(
     snapshot_policy = None
     snap_lstm_state = None
     _last_snap_sd = None  # track last loaded state_dict by identity
+    _last_phase = None    # detect curriculum phase transitions for wandb events
+    _last_eval_results: dict = {}  # carry latest eval results into checkpoint metadata
+    _entropy_alert_sent = False    # only alert once per collapse event
 
     for update in range(start_update, total_updates):
 
@@ -769,12 +776,24 @@ def train(
                     _phase_idx = _negamax_depth_to_phase.get(opp_depth, 1)
                 else:  # self_play
                     _phase_idx = 5
+
+                # Log phase transition as a discrete event
+                if opp_type != _last_phase:
+                    _wandb.log(
+                        {"curriculum/phase_transition": _phase_idx,
+                         "curriculum/phase_name": opp_type},
+                        step=global_step,
+                    )
+                    _last_phase = opp_type
+                    _entropy_alert_sent = False  # reset alert on each new phase
+
                 _wandb.log(
                     {
                         "loss/total": last_loss,
                         "loss/policy": last_pg,
                         "loss/value": last_vf,
                         "loss/entropy": last_ent,
+                        "train/entropy": last_ent,           # prominent top-level metric
                         "train/clip_fraction": mean_clip,
                         "train/learning_rate": optimizer.param_groups[0]["lr"],
                         "train/sps": sps,
@@ -784,6 +803,19 @@ def train(
                     },
                     step=global_step,
                 )
+
+                # Alert when entropy collapses — fires once per phase
+                if last_ent < 0.05 and not _entropy_alert_sent:
+                    _wandb.alert(
+                        title="Entropy Collapse",
+                        text=(
+                            f"Entropy dropped to {last_ent:.4f} at step {global_step:,} "
+                            f"(update {update+1}, phase={opp_type}). "
+                            "Policy is near-deterministic — consider stopping and raising ent_coef."
+                        ),
+                        level=_wandb.AlertLevel.WARN,
+                    )
+                    _entropy_alert_sent = True
 
         # ---- Checkpoint ----------------------------------------------
         if (update + 1) % checkpoint_interval == 0:
@@ -801,7 +833,15 @@ def train(
                 artifact = _wandb.Artifact(
                     name=f"{exp_name}_checkpoint",
                     type="model",
-                    metadata={"global_step": global_step, "update": update + 1},
+                    metadata={
+                        "global_step": global_step,
+                        "update": update + 1,
+                        "phase": opp_type,
+                        "opp_depth": opp_depth,
+                        "entropy": round(last_ent, 4),
+                        **{f"eval_d{d}": round(wr, 3)
+                           for d, wr in _last_eval_results.items()},
+                    },
                 )
                 artifact.add_file(str(path))
                 _wandb.log_artifact(artifact)
@@ -817,11 +857,18 @@ def train(
                 f"d{d}={wr:.0%}" for d, wr in sorted(eval_results.items())
             )
             print(f"  [eval] {eval_str}")
+            _last_eval_results = eval_results  # carry into next checkpoint artifact
             if _wandb is not None:
+                # Scalar win rates per depth (for charts and sweep metric)
                 _wandb.log(
                     {f"eval/win_rate_vs_negamax_d{d}": wr for d, wr in eval_results.items()},
                     step=global_step,
                 )
+                # Table — one row per eval, makes it easy to compare across runs
+                eval_table = _wandb.Table(columns=["step", "phase", "depth", "win_rate"])
+                for d, wr in sorted(eval_results.items()):
+                    eval_table.add_data(global_step, opp_type, d, wr)
+                _wandb.log({"eval/results_table": eval_table}, step=global_step)
 
     # ---- Final checkpoint -------------------------------------------
     final_path = ckpt_dir / "checkpoint_final.pt"
@@ -835,6 +882,11 @@ def train(
     )
     print(f"\n[Train] Complete. final checkpoint → {final_path}")
     if _wandb is not None:
+        # Write key final values to run summary (visible in sweep comparison table)
+        _wandb.run.summary["final_entropy"] = last_ent
+        _wandb.run.summary["final_phase"] = opp_type
+        for d, wr in _last_eval_results.items():
+            _wandb.run.summary[f"final_eval_d{d}"] = wr
         _wandb.finish()
     env.close()
 
