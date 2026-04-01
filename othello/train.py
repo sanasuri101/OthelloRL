@@ -469,11 +469,17 @@ def train(
                 name = name.replace("-", "_")
                 if cfg.has_section(section):
                     cfg.set(section, name, str(value))
-        # Re-parse sweep-affected values
+        # Re-parse ALL sweep-affected values so every hyperparameter can be
+        # varied from a wandb sweep config, not just the subset listed below.
         lr = float(cfg.get("train", "learning_rate"))
         gamma = float(cfg.get("train", "gamma"))
         gae_lambda = float(cfg.get("train", "gae_lambda"))
         ent_coef = float(cfg.get("train", "ent_coef"))
+        clip_coef = float(cfg.get("train", "clip_coef"))
+        vf_coef = float(cfg.get("train", "vf_coef"))
+        max_grad_norm = float(cfg.get("train", "max_grad_norm"))
+        update_epochs = cfg.getint("train", "update_epochs")
+        minibatch_size = cfg.getint("train", "minibatch_size")
         bptt_horizon = cfg.getint("train", "bptt_horizon")
         hidden_size = cfg.getint("policy", "hidden_size")
         # Recalculate derived batch dimensions in case bptt_horizon was swept

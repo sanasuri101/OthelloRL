@@ -317,6 +317,15 @@ static PyObject *vec_step_agent(VecEnv *self, PyObject *args) {
                     continue;
                 }
             }
+            /* After reset, current_player == agent_color (or was toggled to
+             * agent_color by the pre-move above for WHITE agents).
+             * oth_apply_move() always uses g->current_player to decide which
+             * bitboard to update, so we must set it to opp_color here.
+             * Without this fix, negamax_moves_batch computes moves for the
+             * agent's color, and step_opponent applies the "opponent" move to
+             * the agent's bitboard — corrupting the board for the entire episode.
+             */
+            g->current_player = 1 - agent_color;  /* opp_color — ready for step_opponent */
             oth_write_obs(g, self->obs_ptrs[i], agent_color);
             *self->reward_ptrs[i] = 0.0f;
             *self->done_ptrs[i] = 0;
