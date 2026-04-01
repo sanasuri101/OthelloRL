@@ -62,6 +62,7 @@ import pufferlib
 
 from othello.othello import Othello
 from othello.curriculum import CurriculumScheduler
+from othello.eval import evaluate as _evaluate
 
 # ---------------------------------------------------------------------------
 # Built-in config defaults (mirror config.ini so the script runs without it)
@@ -378,6 +379,9 @@ def train(
     bptt_horizon = cfg.getint("train", "bptt_horizon")
     minibatch_size = cfg.getint("train", "minibatch_size")
     checkpoint_interval = cfg.getint("train", "checkpoint_interval")
+    eval_interval = cfg.getint("train", "eval_interval", fallback=50000)
+    eval_depths   = [int(d.strip()) for d in cfg.get("train", "eval_depths", fallback="1,2,3,5").split(",")]
+    eval_n_games  = cfg.getint("train", "eval_n_games", fallback=50)
 
     hidden_size = cfg.getint("policy", "hidden_size")
 
@@ -742,6 +746,23 @@ def train(
                 )
                 artifact.add_file(str(path))
                 _wandb.log_artifact(artifact)
+
+        # ---- Periodic eval ------------------------------------------
+        if global_step > 0 and global_step % eval_interval < num_envs * bptt_horizon:
+            policy.eval()
+            eval_results = _evaluate(
+                policy, depths=eval_depths, n_games=eval_n_games, device=device
+            )
+            policy.train()
+            eval_str = "  ".join(
+                f"d{d}={wr:.0%}" for d, wr in sorted(eval_results.items())
+            )
+            print(f"  [eval] {eval_str}")
+            if _wandb is not None:
+                _wandb.log(
+                    {f"eval/win_rate_vs_negamax_d{d}": wr for d, wr in eval_results.items()},
+                    step=global_step,
+                )
 
     # ---- Final checkpoint -------------------------------------------
     final_path = ckpt_dir / "checkpoint_final.pt"
