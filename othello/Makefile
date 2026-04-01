@@ -1,11 +1,20 @@
-CC ?= gcc
-ARCH_FLAG = -arch $(shell /Users/openclaw/Code/Connect4RL/.venv/bin/python3 -c "import platform; print(platform.machine())")
-CFLAGS = -O3 -shared -fPIC -Wall -Wextra -std=c11 $(ARCH_FLAG)
-LDFLAGS = -undefined dynamic_lookup
+CC      ?= gcc
+PYTHON  ?= python3
+
+UNAME := $(shell uname)
+ifeq ($(UNAME), Darwin)
+    ARCH_FLAG = -arch $(shell $(PYTHON) -c "import platform; print(platform.machine())")
+    LDFLAGS    = -undefined dynamic_lookup
+else
+    ARCH_FLAG =
+    LDFLAGS    =
+endif
+
+CFLAGS       = -O3 -shared -fPIC -Wall -Wextra -std=c11 $(ARCH_FLAG)
 RAYLIB_FLAGS = $(shell pkg-config --cflags --libs raylib 2>/dev/null || echo "-lraylib")
-PYTHON_FLAGS = $(shell /Users/openclaw/Code/Connect4RL/.venv/bin/python3 -c "import sysconfig; print('-I' + sysconfig.get_path('include'))")
-NUMPY_FLAGS = $(shell /Users/openclaw/Code/Connect4RL/.venv/bin/python3 -c "import numpy; print('-I' + numpy.get_include())")
-TARGET = binding$(shell /Users/openclaw/Code/Connect4RL/.venv/bin/python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+PYTHON_FLAGS = $(shell $(PYTHON) -c "import sysconfig; print('-I' + sysconfig.get_path('include'))")
+NUMPY_FLAGS  = $(shell $(PYTHON) -c "import numpy; print('-I' + numpy.get_include())")
+TARGET       = binding$(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 
 .PHONY: all clean test
 
@@ -18,4 +27,4 @@ clean:
 	rm -f $(TARGET) *.o
 
 test:
-	/Users/openclaw/Code/Connect4RL/.venv/bin/python3 -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -v
