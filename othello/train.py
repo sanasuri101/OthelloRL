@@ -213,6 +213,20 @@ def _load_snapshot_policy(
     return snap
 
 
+def _apply_action_mask(logits: torch.Tensor, obs: torch.Tensor) -> torch.Tensor:
+    """Mask logits for illegal actions using the legal-move plane in obs.
+
+    obs layout: [my_pieces(64) | opp_pieces(64) | legal_squares(64)] — 192 dims total.
+    Action space: 0-63 = board squares, 64 = pass.
+    Pass (action 64) is legal only when no squares are legal.
+    """
+    legal = obs[:, 128:192]  # (B, 64) — 1.0 if that square is a legal move
+    has_legal = legal.sum(dim=-1, keepdim=True) > 0  # (B, 1) bool
+    pass_legal = (~has_legal).float()  # (B, 1) — 1.0 when no squares available
+    full_mask = torch.cat([legal, pass_legal], dim=-1)  # (B, 65)
+    return logits.masked_fill(full_mask < 0.5, float("-inf"))
+
+
 def _rollout_step_selfplay(
     env,
     agent_actions: np.ndarray,
@@ -220,12 +234,15 @@ def _rollout_step_selfplay(
     snap_lstm: Dict[str, torch.Tensor],
     device: torch.device,
 ) -> tuple:
-    """One split-step using the snapshot policy as opponent."""
+    """One split-step using the snapshot policy as opponent (with action masking)."""
     opp_obs_np = env.step_agent(agent_actions)
     opp_obs_t = torch.tensor(opp_obs_np, dtype=torch.float32, device=device)
     with torch.no_grad():
         opp_logits, _ = snapshot_policy.forward_eval(opp_obs_t, snap_lstm)
-    opp_actions = opp_logits.argmax(dim=-1).cpu().numpy().astype(np.int32)
+    # Mask illegal actions; sample (not argmax) for exploration diversity
+    opp_masked = _apply_action_mask(opp_logits, opp_obs_t)
+    opp_dist = Categorical(logits=opp_masked)
+    opp_actions = opp_dist.sample().cpu().numpy().astype(np.int32)
     return env.step_opponent(opp_actions)
 
 
@@ -559,7 +576,8 @@ def train(
                         snap_lstm_state["lstm_c"][:, mask] = 0.0
 
                 logits, value = policy.forward_eval(obs, lstm_state)
-                dist = Categorical(logits=logits)
+                masked_logits = _apply_action_mask(logits, obs)
+                dist = Categorical(logits=masked_logits)
                 action = dist.sample()
                 log_prob = dist.log_prob(action)
 
@@ -655,7 +673,8 @@ def train(
                     "lstm_c": b_lstm_c[idx].unsqueeze(0),
                 }
                 logits, new_value = policy.forward_eval(b_obs[idx], mb_state)
-                dist = Categorical(logits=logits)
+                masked_logits = _apply_action_mask(logits, b_obs[idx])
+                dist = Categorical(logits=masked_logits)
                 new_log_prob = dist.log_prob(b_actions[idx])
                 entropy = dist.entropy()
 
@@ -708,8 +727,15 @@ def train(
                 f"SPS={sps:.0f}"
             )
             if _wandb is not None:
-                # Phase index: 0=random, 1-4=negamax depths 1-5, 5=self_play (6 phases total)
-                _phase_idx = {"random": 0, "negamax": 1, "self_play": 5}.get(opp_type, 0)
+                # Phase index: 0=random, 1=negamax_d1, 2=negamax_d2, 3=negamax_d3,
+                # 4=negamax_d5, 5=self_play — mirrors PHASE_BOUNDARIES order
+                _negamax_depth_to_phase = {1: 1, 2: 2, 3: 3, 5: 4}
+                if opp_type == "random":
+                    _phase_idx = 0
+                elif opp_type == "negamax":
+                    _phase_idx = _negamax_depth_to_phase.get(opp_depth, 1)
+                else:  # self_play
+                    _phase_idx = 5
                 _wandb.log(
                     {
                         "loss/total": last_loss,

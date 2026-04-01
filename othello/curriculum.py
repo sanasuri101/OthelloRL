@@ -55,8 +55,10 @@ class CurriculumScheduler:
 
     def get_phase(self, global_step):
         frac = self.get_difficulty(global_step)
-        for start, end, ptype, depth in PHASE_BOUNDARIES:
-            if start <= frac < end:
+        for i, (start, end, ptype, depth) in enumerate(PHASE_BOUNDARIES):
+            is_last = i == len(PHASE_BOUNDARIES) - 1
+            # Use <= for end on the last phase so frac=1.0 is included
+            if start <= frac < end or (is_last and frac >= start):
                 return {"type": ptype, "depth": depth, "difficulty": frac}
         return {"type": "self_play", "depth": 0, "difficulty": 1.0}
 
