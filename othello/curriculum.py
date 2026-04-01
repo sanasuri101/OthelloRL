@@ -4,15 +4,31 @@ import multiprocessing
 import random
 
 
-# Phase boundaries as fractions of total_timesteps
-PHASE_BOUNDARIES = [
-    (0.00, 0.05, "random", 0),
-    (0.05, 0.15, "negamax", 1),
-    (0.15, 0.30, "negamax", 2),
-    (0.30, 0.50, "negamax", 3),
-    (0.50, 0.65, "negamax", 5),
-    (0.65, 1.00, "self_play", 0),
+# Default phase split-points as fractions of total_timesteps.
+# Each value is where the *next* phase begins.
+# Override by passing phase_fractions to CurriculumScheduler.
+_DEFAULT_PHASE_FRACTIONS = [0.05, 0.15, 0.30, 0.50, 0.65]
+
+# Phase type/depth sequence (fixed; only the boundary fractions are configurable).
+_PHASE_DEFS = [
+    ("random",   0),
+    ("negamax",  1),
+    ("negamax",  2),
+    ("negamax",  3),
+    ("negamax",  5),
+    ("self_play", 0),
 ]
+
+
+def _build_phase_boundaries(phase_fractions):
+    """Build the list of (start, end, type, depth) tuples from split-point fractions."""
+    fracs = list(phase_fractions)
+    starts = [0.0] + fracs
+    ends   = fracs + [1.0]
+    return [
+        (start, end, ptype, depth)
+        for (ptype, depth), start, end in zip(_PHASE_DEFS, starts, ends)
+    ]
 
 
 class SelfPlayPool:
@@ -50,6 +66,7 @@ class CurriculumScheduler:
         total_timesteps=200_000_000,
         self_play_pool_capacity=5,
         self_play_refresh_interval=5_000_000,
+        phase_fractions=None,
     ):
         self.total_timesteps = total_timesteps
         self.difficulty_value = multiprocessing.Value("f", 0.0)
@@ -57,15 +74,17 @@ class CurriculumScheduler:
             max_size=self_play_pool_capacity,
             refresh_interval=self_play_refresh_interval,
         )
+        fracs = phase_fractions if phase_fractions is not None else _DEFAULT_PHASE_FRACTIONS
+        self.phase_boundaries = _build_phase_boundaries(fracs)
 
     def get_difficulty(self, global_step):
         return min(1.0, max(0.0, global_step / self.total_timesteps))
 
     def get_phase(self, global_step):
         frac = self.get_difficulty(global_step)
-        for i, (start, end, ptype, depth) in enumerate(PHASE_BOUNDARIES):
-            is_last = i == len(PHASE_BOUNDARIES) - 1
-            # Use <= for end on the last phase so frac=1.0 is included
+        for i, (start, end, ptype, depth) in enumerate(self.phase_boundaries):
+            is_last = i == len(self.phase_boundaries) - 1
+            # Use >= start (no upper bound) for the last phase so frac=1.0 is included
             if start <= frac < end or (is_last and frac >= start):
                 return {"type": ptype, "depth": depth, "difficulty": frac}
         return {"type": "self_play", "depth": 0, "difficulty": 1.0}

@@ -364,62 +364,128 @@ class TestSplitStep:
             total_done += int(dones.sum())
         assert total_done > 0, "At least some games should have finished"
 
-    def test_auto_reset_opponent_move_goes_to_correct_board(self):
-        """After an episode resets, the opponent's first move must update the
-        opponent's bitboard, not the agent's.
+    def test_auto_reset_step_opponent_is_skipped(self):
+        """After an auto-reset, vec_step_opponent must be a no-op (just_reset flag).
 
-        Before the fix, vec_step_agent left current_player == agent_color after
-        auto-reset.  oth_apply_move uses current_player to decide which bitboard
-        to update, so the opponent's move was applied to the agent's board,
-        corrupting all subsequent game state for that episode.
+        The split-step loop always calls step_opponent after step_agent.  When
+        step_agent performs an auto-reset the episode is brand-new and the agent
+        hasn't moved yet, so there is nothing for the opponent to respond to.
+        The just_reset flag makes step_opponent skip that env for exactly one
+        cycle, ensuring the agent always makes the first move of each episode.
+
+        Verified: piece count must not change between the auto-reset and the
+        first step_opponent call, and dones/rewards remain zero.
         """
         n = 1
         vec, obs, actions, rewards, dones, opp_obs = self._make_env(n=n)
+        opp_actions = np.zeros(n, dtype=np.int32)
 
-        # Force a quick game termination by passing an illegal move (action = 0
-        # is never legal on the very first move of a fresh game since square 0
-        # is a corner with no valid flip).  The engine sets done=1 immediately.
-        # Confirm there are legal moves so action-0 is definitely illegal.
+        # Force immediate game over with an illegal move (square 0 is never
+        # legal on the opening board).
+        legal = np.where(obs[0, 128:])[0]
+        assert 0 not in legal, "square 0 should be illegal at game start"
+        actions[0] = 0
+        vec.step_agent()
+        assert dones[0] == 1, "illegal move should end the game"
+
+        # Trigger auto-reset: action is discarded, fresh board written.
+        actions[0] = 64
+        vec.step_agent()
+        assert dones[0] == 0, "done should clear after auto-reset"
+        assert rewards[0] == 0.0, "reward should be 0 after auto-reset"
+
+        # Record piece count on the freshly-reset board.
+        pieces_after_reset = obs[0, :64].sum() + obs[0, 64:128].sum()
+
+        # step_opponent must skip (just_reset flag active).
+        opp_actions[0] = int(np.where(opp_obs[0, 128:])[0][0]) if opp_obs[0, 128:].sum() > 0 else 64
+        vec.step_opponent(opp_actions)
+
+        pieces_after_skip = obs[0, :64].sum() + obs[0, 64:128].sum()
+        assert pieces_after_skip == pieces_after_reset, (
+            f"step_opponent must not place a piece when just_reset is active "
+            f"(piece count changed from {pieces_after_reset} to {pieces_after_skip})"
+        )
+        assert dones[0] == 0, "done must remain 0 after skipped step_opponent"
+        assert rewards[0] == 0.0, "reward must remain 0 after skipped step_opponent"
+
+        # Now the agent makes the true first move of the new episode.
+        legal_now = np.where(obs[0, 128:])[0]
+        assert len(legal_now) > 0, "agent must have legal moves on the fresh board"
+        actions[0] = int(legal_now[0])
+        vec.step_agent()
+        # Board should have changed (agent's first move was applied).
+        pieces_after_first_move = obs[0, :64].sum() + obs[0, 64:128].sum()
+        # After agent places and flips, piece count changes from starting position.
+        # step_agent for split-step writes opp_obs but NOT agent obs yet (that's
+        # done by step_opponent); done/reward may or may not be set depending on
+        # whether the agent move was terminal.  We just verify no crash and that
+        # the game progressed (or ended with a valid reward).
+        assert rewards[0] in (-1.0, 0.0, 1.0), (
+            f"reward after first real move must be -1, 0, or 1; got {rewards[0]}"
+        )
+
+    def test_auto_reset_opponent_move_goes_to_correct_board(self):
+        """After an episode resets, the opponent's move must update the
+        opponent's bitboard, not the agent's.
+
+        With the just_reset fix, step_opponent is skipped for one cycle after
+        auto-reset (the agent moves first).  We therefore exercise the full
+        sequence: auto-reset → step_opponent skip → agent first move →
+        step_opponent response, and verify the response lands on the correct
+        (opponent) bitboard.
+        """
+        n = 1
+        vec, obs, actions, rewards, dones, opp_obs = self._make_env(n=n)
+        opp_actions = np.zeros(n, dtype=np.int32)
+
+        # Force game over with an illegal first move (square 0 is never legal
+        # on the opening board).
         legal = np.where(obs[0, 128:])[0]
         assert 0 not in legal, "square 0 should not be legal at game start"
-
-        actions[0] = 0  # illegal → done=1, reward=-1
+        actions[0] = 0
         vec.step_agent()
         assert dones[0] == 1, "illegal move should terminate the game"
 
-        # Now the env is done.  On the next step_agent call it will auto-reset
-        # and serve the initial board of a fresh game.  We choose any legal
-        # opponent move and apply it.  After the fix, the piece must land on
-        # the opponent's bitboard (opp_obs plane 0 = opponent's pieces viewed
-        # from their perspective = they are 'my' pieces in opp_obs).
-        agent_my_pieces_before = obs[0, :64].copy()
-        agent_opp_pieces_before = obs[0, 64:128].copy()
-
-        # Trigger auto-reset: pass any action (it will be discarded)
-        actions[0] = 64  # pass — will be ignored during auto-reset
+        # --- auto-reset cycle ---
+        # step_agent will discard the action and reset; done cleared, just_reset set.
+        actions[0] = 64
         vec.step_agent()
-        # After auto-reset, done should be cleared
         assert dones[0] == 0, "done should be cleared after auto-reset"
 
-        # opp_obs should show a clean starting board for the opponent
-        opp_my_pieces = opp_obs[0, :64]
-        opp_legal = np.where(opp_obs[0, 128:])[0]
-        assert len(opp_legal) > 0, "opponent must have legal moves in fresh game"
-
-        # Apply opponent's first move
-        opp_actions = np.zeros(n, dtype=np.int32)
-        opp_actions[0] = int(opp_legal[0])
-        chosen_sq = opp_actions[0]
+        # step_opponent is a no-op (just_reset); board should not change.
+        pieces_before = obs[0, :64].sum() + obs[0, 64:128].sum()
+        opp_actions[0] = 64
         vec.step_opponent(opp_actions)
+        pieces_after_skip = obs[0, :64].sum() + obs[0, 64:128].sum()
+        assert pieces_after_skip == pieces_before, "step_opponent must be a no-op on just_reset cycle"
 
-        # After the opponent moves: the agent's observation should show the
-        # chosen square as an OPPONENT piece (obs plane 1), not as an agent
-        # piece (obs plane 0).  Before the fix, it appeared as agent piece.
-        new_agent_my   = obs[0, :64]
-        new_agent_opp  = obs[0, 64:128]
-        assert new_agent_opp[chosen_sq] == 1.0 or new_agent_my[chosen_sq] == 1.0, \
-            f"square {chosen_sq} should be occupied after opponent's move"
-        assert new_agent_my[chosen_sq] == 0.0, (
-            f"square {chosen_sq} must NOT be on the agent's board after opponent's "
-            f"move — current_player bug would place it on the agent's bitboard"
-        )
+        # --- normal first step of the new episode ---
+        # Agent makes its true first move.
+        agent_legal = np.where(obs[0, 128:])[0]
+        assert len(agent_legal) > 0, "agent must have legal moves on fresh board"
+        actions[0] = int(agent_legal[0])
+        vec.step_agent()
+        # step_agent writes opp_obs so the opponent can respond.
+        # The game may or may not be terminal here (invalid move penalty),
+        # but if not done, opp_obs should contain legal moves for the opponent.
+        if dones[0] == 0:
+            opp_legal = np.where(opp_obs[0, 128:])[0]
+            if len(opp_legal) == 0:
+                opp_actions[0] = 64  # pass
+            else:
+                opp_actions[0] = int(opp_legal[0])
+            chosen_sq = opp_actions[0]
+            vec.step_opponent(opp_actions)
+
+            if chosen_sq < 64:
+                # The chosen square must appear as an OPPONENT piece
+                # (obs plane 1), never as the agent's piece (obs plane 0).
+                new_agent_my  = obs[0, :64]
+                new_agent_opp = obs[0, 64:128]
+                occupied = new_agent_my[chosen_sq] == 1.0 or new_agent_opp[chosen_sq] == 1.0
+                assert occupied, f"square {chosen_sq} should be occupied after opponent's move"
+                assert new_agent_my[chosen_sq] == 0.0, (
+                    f"square {chosen_sq} must NOT be on the agent's board — "
+                    f"would indicate a current_player / just_reset bug"
+                )

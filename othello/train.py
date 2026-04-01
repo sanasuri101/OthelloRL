@@ -77,19 +77,21 @@ _CONFIG_DEFAULTS: dict = {
         "seed": "42",
         "torch_deterministic": "True",
         "device": "cpu",
-        "total_timesteps": "20000000",
+        "total_timesteps": "150000000",
         "learning_rate": "3e-4",
         "gamma": "0.995",
         "gae_lambda": "0.95",
         "update_epochs": "4",
         "clip_coef": "0.2",
         "vf_coef": "1.0",
-        "ent_coef": "0.005",
+        "ent_coef": "0.01",
         "max_grad_norm": "0.5",
         "anneal_lr": "True",
-        "bptt_horizon": "16",
+        "bptt_horizon": "32",
         "minibatch_size": "2048",
         "checkpoint_interval": "200",
+        "eval_interval": "1000000",
+        "eval_n_games": "200",
     },
     "policy": {
         "hidden_size": "256",
@@ -492,10 +494,20 @@ def train(
     # ------------------------------------------------------------------
     self_play_pool_capacity = cfg.getint("curriculum", "self_play_pool_capacity", fallback=20)
     self_play_refresh_interval = cfg.getint("curriculum", "self_play_refresh_interval", fallback=50_000)
+    # Phase split-points: fraction of total_timesteps where each phase begins.
+    # phase_0 always starts at 0.0; these 5 values define the remaining boundaries.
+    phase_fractions = [
+        cfg.getfloat("curriculum", "phase_1_fraction", fallback=0.05),
+        cfg.getfloat("curriculum", "phase_2_fraction", fallback=0.15),
+        cfg.getfloat("curriculum", "phase_3_fraction", fallback=0.30),
+        cfg.getfloat("curriculum", "phase_4_fraction", fallback=0.50),
+        cfg.getfloat("curriculum", "phase_5_fraction", fallback=0.65),
+    ]
     curriculum = CurriculumScheduler(
         total_timesteps=total_timesteps,
         self_play_pool_capacity=self_play_pool_capacity,
         self_play_refresh_interval=self_play_refresh_interval,
+        phase_fractions=phase_fractions,
     )
 
     # ------------------------------------------------------------------

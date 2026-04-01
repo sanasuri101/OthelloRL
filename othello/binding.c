@@ -18,6 +18,7 @@ typedef struct {
     float **reward_ptrs;
     int **done_ptrs;
     float **opp_obs_ptrs;  // opponent observation buffer, set by set_opp_obs()
+    int   *just_reset;    // per-env flag: 1 after auto-reset, cleared by step_opponent
     // Stats accumulators
     int total_wins;
     int total_games;
@@ -33,6 +34,7 @@ static void VecEnv_dealloc(VecEnv *self) {
     if (self->reward_ptrs) free(self->reward_ptrs);
     if (self->done_ptrs) free(self->done_ptrs);
     if (self->opp_obs_ptrs) free(self->opp_obs_ptrs);
+    if (self->just_reset)   free(self->just_reset);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -47,6 +49,7 @@ static PyObject *VecEnv_new(PyTypeObject *type, PyObject *args, PyObject *kwds) 
         self->reward_ptrs = NULL;
         self->done_ptrs = NULL;
         self->opp_obs_ptrs = NULL;
+        self->just_reset = NULL;
         self->total_wins = 0;
         self->total_games = 0;
         self->total_invalid_moves = 0;
@@ -72,8 +75,10 @@ static PyObject *vec_init(VecEnv *self, PyObject *args) {
     self->reward_ptrs = (float **)calloc(num_envs, sizeof(float *));
     self->done_ptrs = (int **)calloc(num_envs, sizeof(int *));
 
+    self->just_reset = (int *)calloc(num_envs, sizeof(int));
+
     if (!self->envs || !self->obs_ptrs || !self->action_ptrs ||
-        !self->reward_ptrs || !self->done_ptrs) {
+        !self->reward_ptrs || !self->done_ptrs || !self->just_reset) {
         PyErr_SetString(PyExc_MemoryError, "Failed to allocate environment memory");
         return NULL;
     }
@@ -317,15 +322,15 @@ static PyObject *vec_step_agent(VecEnv *self, PyObject *args) {
                     continue;
                 }
             }
-            /* After reset, current_player == agent_color (or was toggled to
-             * agent_color by the pre-move above for WHITE agents).
-             * oth_apply_move() always uses g->current_player to decide which
-             * bitboard to update, so we must set it to opp_color here.
-             * Without this fix, negamax_moves_batch computes moves for the
-             * agent's color, and step_opponent applies the "opponent" move to
-             * the agent's bitboard — corrupting the board for the entire episode.
+            /* Mark this env as just-reset so vec_step_opponent skips its
+             * opponent move this cycle.  current_player is already correct:
+             *   BLACK agent: current_player == BLACK (set by oth_reset)
+             *   WHITE agent: current_player == WHITE (toggled by play_random_opponent)
+             * The agent's true first move in the next step_agent call will
+             * naturally toggle current_player to opp_color, so subsequent
+             * step_opponent calls work without any manual fixup.
              */
-            g->current_player = 1 - agent_color;  /* opp_color — ready for step_opponent */
+            self->just_reset[i] = 1;
             oth_write_obs(g, self->obs_ptrs[i], agent_color);
             *self->reward_ptrs[i] = 0.0f;
             *self->done_ptrs[i] = 0;
@@ -368,6 +373,15 @@ static PyObject *vec_step_opponent(VecEnv *self, PyObject *args) {
         // Skip envs that already terminated in step_agent
         if (g->done || *self->done_ptrs[i] == 1) {
             oth_write_obs(g, self->obs_ptrs[i], g->episode_id % 2);
+            continue;
+        }
+
+        /* Skip envs that just auto-reset: the agent hasn't moved yet this
+         * episode, so there is no opponent response this cycle.
+         * obs/reward/done were already written correctly by step_agent.
+         */
+        if (self->just_reset[i]) {
+            self->just_reset[i] = 0;
             continue;
         }
 
