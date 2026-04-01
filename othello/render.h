@@ -1,8 +1,11 @@
 #ifndef RENDER_H
 #define RENDER_H
 
-#include "raylib.h"
 #include "othello.h"
+
+#ifndef NO_RENDER
+#include "raylib.h"
+#endif
 
 #define WINDOW_WIDTH 600
 #define WINDOW_HEIGHT 700
@@ -13,6 +16,15 @@
 #define BOARD_OFFSET_X ((WINDOW_WIDTH - BOARD_SIZE_PX) / 2)
 #define BOARD_OFFSET_Y HEADER_HEIGHT
 #define PIECE_RADIUS (CELL_SIZE / 2 - 6)
+
+#ifdef NO_RENDER
+
+/* Headless stubs — compiled when NO_RENDER is defined (e.g. in CI). */
+static void render_board(Othello *g) { (void)g; }
+static int  render_should_close(void) { return 0; }
+static int  render_get_click(void) { return -1; }
+
+#else /* full raylib implementation */
 
 static int render_initialized = 0;
 
@@ -103,5 +115,7 @@ static int render_get_click(void) {
     int row = my / CELL_SIZE;
     return row * 8 + col;
 }
+
+#endif /* NO_RENDER */
 
 #endif /* RENDER_H */
