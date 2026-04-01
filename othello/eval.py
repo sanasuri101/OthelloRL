@@ -20,7 +20,7 @@ def evaluate(
     policy: nn.Module,
     depths: list[int] | None = None,
     n_games: int = 100,
-    device: str = "cpu",
+    device: str | torch.device = "cpu",
 ) -> dict[int, float]:
     """Evaluate *policy* against negamax at each depth in *depths*.
 
@@ -72,6 +72,8 @@ def evaluate(
 
         while games_done < n_games:
             obs_t = torch.tensor(obs_np, dtype=torch.float32, device=device)
+            # forward_eval updates lstm_state in-place (replaces "lstm_h"/"lstm_c" values).
+            # This is an intentional shared-state contract — callers must not cache the dict.
             with torch.no_grad():
                 logits, _ = policy.forward_eval(obs_t, lstm_state)
             action = logits.argmax(dim=-1).cpu().numpy().astype(np.int32)

@@ -62,6 +62,7 @@ import pufferlib
 
 from othello.othello import Othello
 from othello.curriculum import CurriculumScheduler
+from othello.eval import evaluate as _evaluate
 
 # ---------------------------------------------------------------------------
 # Built-in config defaults (mirror config.ini so the script runs without it)
@@ -748,7 +749,6 @@ def train(
 
         # ---- Periodic eval ------------------------------------------
         if global_step > 0 and global_step % eval_interval < num_envs * bptt_horizon:
-            from othello.eval import evaluate as _evaluate
             policy.eval()
             eval_results = _evaluate(
                 policy, depths=eval_depths, n_games=eval_n_games, device=device

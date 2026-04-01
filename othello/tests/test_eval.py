@@ -54,3 +54,9 @@ class TestEvaluate:
         wr = results[1]
         # win_rate must be a multiple of 1/3: 0, 1/3, 2/3, or 1
         assert any(abs(wr - k / 3) < 1e-9 for k in range(4))
+
+    def test_raises_on_zero_n_games(self):
+        """evaluate() raises ValueError for n_games <= 0."""
+        policy = _make_dummy_policy()
+        with pytest.raises(ValueError, match="n_games must be >= 1"):
+            evaluate(policy, depths=[1], n_games=0)

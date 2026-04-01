@@ -17,13 +17,16 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
+          enable-cache: true
 
       - name: Install Python dependencies
         working-directory: othello
         run: uv sync
 
       - name: Install raylib (required by C extension)
-        run: sudo apt-get update && sudo apt-get install -y libraylib-dev
+        run: |
+          sudo apt-get update && sudo apt-get install -y libraylib-dev
+          pkg-config --exists raylib || (echo "ERROR: raylib not found via pkg-config after install"; exit 1)
 
       - name: Build C extension
         working-directory: othello
