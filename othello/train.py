@@ -447,6 +447,7 @@ def train(
             project=wandb_project,
             entity=wandb_entity,
             name=wandb_run_name,
+            resume="allow",  # attach to agent's pre-created run if WANDB_RUN_ID is set
             config={
                 "num_envs": num_envs,
                 "total_timesteps": total_timesteps,
