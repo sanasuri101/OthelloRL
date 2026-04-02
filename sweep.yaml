@@ -15,7 +15,7 @@ early_terminate:
 #   - Eval every 500k steps so hyperband has enough signal to prune early
 command:
   - ${env}
-  - ${interpreter}
+  - python
   - ${program}
   - --wandb
   - --wandb_project
