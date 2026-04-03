@@ -15,7 +15,7 @@ NO_RENDER ?= 0
 ifeq ($(NO_RENDER), 1)
     RAYLIB_FLAGS = -DNO_RENDER
 else
-    RAYLIB_FLAGS = $(shell pkg-config --cflags --libs raylib 2>/dev/null || echo "-lraylib")
+    RAYLIB_FLAGS = $(shell PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig pkg-config --cflags --libs raylib 2>/dev/null || echo "-lraylib")
 endif
 PYTHON_FLAGS = $(shell $(PYTHON) -c "import sysconfig; print('-I' + sysconfig.get_path('include'))")
 NUMPY_FLAGS  = $(shell $(PYTHON) -c "import numpy; print('-I' + numpy.get_include())")
