@@ -122,20 +122,26 @@ def select_action(policy, obs_tensor, lstm_state):
     """Run one forward pass and return (action, new_lstm_state)."""
     with torch.no_grad():
         obs_batch = obs_tensor.unsqueeze(0)  # (1, OBS_DIM)
-        try:
-            output, new_lstm = policy(obs_batch, lstm_state)
-        except TypeError:
-            # Policy may not accept lstm_state
-            output = policy(obs_batch)
-            new_lstm = lstm_state
 
-        if isinstance(output, tuple):
-            logits = output[0]
-        else:
-            logits = output
+        # Initialise LSTM state on first call
+        if lstm_state is None:
+            h = policy.lstm_cell.hidden_size
+            lstm_state = {
+                "lstm_h": torch.zeros(1, 1, h),
+                "lstm_c": torch.zeros(1, 1, h),
+            }
+
+        logits, _ = policy.forward_eval(obs_batch, lstm_state)
+
+        # Mask illegal actions using the legal-move plane (obs dims 128-191)
+        legal = obs_batch[:, 128:192]
+        has_legal = legal.sum(dim=-1, keepdim=True) > 0
+        pass_legal = (~has_legal).float()
+        full_mask = torch.cat([legal, pass_legal], dim=-1)  # (1, 65)
+        logits = logits.masked_fill(full_mask < 0.5, float("-inf"))
 
         action = int(torch.argmax(logits, dim=-1).item())
-    return action, new_lstm
+    return action, lstm_state
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +234,119 @@ def run_visual(checkpoint_path, num_episodes):
 
 
 # ---------------------------------------------------------------------------
+# Mode: self-play visual
+# ---------------------------------------------------------------------------
+
+
+def run_selfplay(checkpoint_path, num_episodes, move_delay=0.5):
+    """Watch checkpoint_016600 play against itself with raylib rendering.
+
+    Black = checkpoint policy, opening Dirichlet noise then argmax.
+    White = same checkpoint policy, opening Dirichlet noise then argmax.
+    Both use independent LSTM states.
+    """
+    import othello as _othello_pkg
+
+    env = _othello_pkg.Othello(num_envs=1)
+    policy = _build_policy()
+    load_checkpoint(checkpoint_path, policy)
+    policy.eval()
+
+    h = policy.lstm_cell.hidden_size
+
+    def fresh_lstm():
+        return {
+            "lstm_h": torch.zeros(1, 1, h),
+            "lstm_c": torch.zeros(1, 1, h),
+        }
+
+    def pick_action(logits, full_mask, move_count):
+        """Dirichlet-noised sampling for opening, argmax thereafter."""
+        if move_count < 8:
+            probs = torch.softmax(logits, dim=-1)
+            legal_indices = full_mask[0].nonzero(as_tuple=True)[0]
+            n_legal = len(legal_indices)
+            if n_legal > 0:
+                noise = torch.tensor(
+                    np.random.dirichlet([0.3] * n_legal), dtype=torch.float32
+                )
+                probs[0, legal_indices] = 0.75 * probs[0, legal_indices] + 0.25 * noise
+            return torch.distributions.Categorical(probs=probs).sample().cpu().numpy().astype(np.int32)
+        return logits.argmax(dim=-1).cpu().numpy().astype(np.int32)
+
+    black_lstm = fresh_lstm()
+    white_lstm = fresh_lstm()
+    episodes_done = 0
+    black_wins = white_wins = draws = 0
+    move_count = 0
+
+    env.reset()
+    print(f"--- Agent (Black) vs Agent (White) — checkpoint_016600 self-play ---")
+
+    while episodes_done < num_episodes:
+        if env._c_env.render_should_close():
+            break
+
+        # ── Black's turn ─────────────────────────────────────────────────
+        env._c_env.render(0)
+        time.sleep(move_delay)
+
+        obs_t = torch.tensor(env.observations, dtype=torch.float32)
+        with torch.no_grad():
+            logits, _ = policy.forward_eval(obs_t, black_lstm)
+            legal = obs_t[:, 128:192]
+            has_legal = legal.sum(dim=-1, keepdim=True) > 0
+            pass_legal = (~has_legal).float()
+            full_mask = torch.cat([legal, pass_legal], dim=-1)
+            logits = logits.masked_fill(full_mask < 0.5, float("-inf"))
+            black_action = pick_action(logits, full_mask, move_count)
+
+        opp_obs_np = env.step_agent(black_action)
+        move_count += 1
+
+        # ── White's turn ─────────────────────────────────────────────────
+        env._c_env.render(0)
+        time.sleep(move_delay)
+
+        opp_obs_t = torch.tensor(opp_obs_np, dtype=torch.float32)
+        with torch.no_grad():
+            logits, _ = policy.forward_eval(opp_obs_t, white_lstm)
+            legal = opp_obs_t[:, 128:192]
+            has_legal = legal.sum(dim=-1, keepdim=True) > 0
+            pass_legal = (~has_legal).float()
+            full_mask = torch.cat([legal, pass_legal], dim=-1)
+            logits = logits.masked_fill(full_mask < 0.5, float("-inf"))
+            white_action = pick_action(logits, full_mask, move_count)
+
+        _, rew_np, term_np, _, _ = env.step_opponent(white_action)
+        move_count += 1
+
+        if term_np[0]:
+            env._c_env.render(0)
+            episodes_done += 1
+            if rew_np[0] > 0:
+                result = "Black wins"
+                black_wins += 1
+            elif rew_np[0] < 0:
+                result = "White wins"
+                white_wins += 1
+            else:
+                result = "Draw"
+                draws += 1
+            print(f"Game {episodes_done}: {result}  "
+                  f"[Black {black_wins}W / White {white_wins}W / {draws}D]")
+            time.sleep(1.5)
+            env.reset()
+            black_lstm = fresh_lstm()
+            white_lstm = fresh_lstm()
+            move_count = 0
+
+    env.close()
+    print(f"\nFinal: Black {black_wins}W / White {white_wins}W / {draws}D "
+          f"out of {episodes_done} games")
+
+
+# ---------------------------------------------------------------------------
 # Mode: ladder (negamax depths)
 # ---------------------------------------------------------------------------
 
@@ -282,50 +401,100 @@ def run_ladder(checkpoint_path, episodes_per_depth=50):
 
 
 def run_human(checkpoint_path):
-    """Human plays against the agent using mouse clicks on the rendered board."""
-    env = SingleEnv()
+    """Human (Black) vs Agent (White).
+
+    Flow mirrors _rollout_step_selfplay in train.py:
+      step_agent(human_click)  →  human plays Black, returns White obs
+      step_opponent(ai_action) →  AI plays White from White obs, returns Black obs + reward
+    """
+    import othello as _othello_pkg
+
+    env = _othello_pkg.Othello(num_envs=1)
     policy = _build_policy()
     load_checkpoint(checkpoint_path, policy)
     policy.eval()
 
-    print("--- Human vs Agent ---")
-    print("Click a square to place your piece.  Close the window to quit.")
+    h = policy.lstm_cell.hidden_size
 
-    obs = env.reset()
-    lstm_state = None
-    done = False
-    reward = 0.0
-    human_turn = False  # Agent moves first (plays as the env's default color)
+    print("--- Human (Black) vs Agent (White) ---")
+    print("You are Black and move first. Click a highlighted square.")
+    print("Close the window to quit.")
 
-    while not env.render_should_close():
-        env.render()
+    env.reset()
+    ai_lstm = {
+        "lstm_h": torch.zeros(1, 1, h),
+        "lstm_c": torch.zeros(1, 1, h),
+    }
+    game_count = 0
 
-        if done:
-            result = "YOU WIN" if reward < 0 else ("YOU LOSE" if reward > 0 else "DRAW")
-            print(f"Game over: {result} (reward={reward:.2f})")
-            time.sleep(2.0)
-            obs = env.reset()
-            lstm_state = None
-            done = False
-            human_turn = False
-            continue
+    while not env._c_env.render_should_close():
 
-        if human_turn:
-            click = env.render_get_click()
-            if click < 0:
-                # No click yet
-                time.sleep(0.016)  # ~60 fps polling
-                continue
-            # click is the board square index (0-63) or -1 for no click
-            obs, reward, done = env.step(click)
-            human_turn = False
+        # ── Human's turn (Black) ────────────────────────────────────────
+        # Drain any stale clicks buffered during AI's turn
+        while env._c_env.render_get_click() >= 0:
+            pass
+
+        # Check if Black has any legal moves — if not, auto-pass
+        obs_now = env.observations[0]
+        legal_plane = obs_now[128:192]
+        has_legal_moves = legal_plane.sum() > 0.5
+
+        if not has_legal_moves:
+            print("  (Black has no legal moves — passing)")
+            opp_obs_np = env.step_agent(np.array([64], dtype=np.int32))  # 64 = pass
         else:
-            # Agent's turn
-            time.sleep(0.3)
-            obs_t = torch.tensor(obs, dtype=torch.float32)
-            action, lstm_state = select_action(policy, obs_t, lstm_state)
-            obs, reward, done = env.step(action)
-            human_turn = True
+            # Render and wait for a LEGAL click — ignore illegal squares silently
+            click = -1
+            while click < 0:
+                if env._c_env.render_should_close():
+                    env.close()
+                    return
+                env._c_env.render(0)
+                candidate = env._c_env.render_get_click()
+                if candidate < 0:
+                    time.sleep(0.016)
+                    continue
+                # Validate against legal move plane (obs dims 128-191)
+                if candidate < 64 and legal_plane[candidate] > 0.5:
+                    click = candidate  # legal — accept
+                # else: illegal square, ignore and wait
+
+            opp_obs_np = env.step_agent(np.array([click], dtype=np.int32))
+
+        # Show board immediately after human's move
+        env._c_env.render(0)
+
+        # ── AI's turn (White = opponent) ────────────────────────────────
+        time.sleep(0.5)
+
+        if env._c_env.render_should_close():
+            env.close()
+            return
+
+        opp_obs_t = torch.tensor(opp_obs_np, dtype=torch.float32)
+        with torch.no_grad():
+            logits, _ = policy.forward_eval(opp_obs_t, ai_lstm)
+            legal = opp_obs_t[:, 128:192]
+            has_legal = legal.sum(dim=-1, keepdim=True) > 0
+            pass_legal = (~has_legal).float()
+            full_mask = torch.cat([legal, pass_legal], dim=-1)
+            logits = logits.masked_fill(full_mask < 0.5, float("-inf"))
+            ai_action = logits.argmax(dim=-1).cpu().numpy().astype(np.int32)
+
+        _, rew_np, term_np, _, _ = env.step_opponent(ai_action)
+
+        if term_np[0]:
+            game_count += 1
+            # reward is from agent (Black/human) perspective
+            result = "YOU WIN" if rew_np[0] > 0 else ("YOU LOSE" if rew_np[0] < 0 else "DRAW")
+            print(f"Game {game_count}: {result}")
+            env._c_env.render(0)
+            time.sleep(2.0)
+            env.reset()
+            ai_lstm = {
+                "lstm_h": torch.zeros(1, 1, h),
+                "lstm_c": torch.zeros(1, 1, h),
+            }
 
     env.close()
 
@@ -341,7 +510,13 @@ def _build_policy():
 
     obs_space = gym.spaces.Box(low=0.0, high=1.0, shape=(OBS_DIM,), dtype=np.float32)
     act_space = gym.spaces.Discrete(NUM_ACTIONS)
-    return make_policy(obs_space, act_space)
+
+    # make_policy expects an env-like object with single_observation_space / single_action_space
+    class _FakeEnv:
+        single_observation_space = obs_space
+        single_action_space = act_space
+
+    return make_policy(_FakeEnv(), hidden_size=256)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +559,11 @@ def parse_args():
         action="store_true",
         help="Human mode: play against the agent via mouse clicks",
     )
+    mode.add_argument(
+        "--selfplay",
+        action="store_true",
+        help="Self-play mode: watch the agent play against itself",
+    )
 
     parser.add_argument(
         "--render-episodes",
@@ -411,6 +591,8 @@ def main():
         run_ladder(args.checkpoint, args.ladder_episodes)
     elif args.human:
         run_human(args.checkpoint)
+    elif args.selfplay:
+        run_selfplay(args.checkpoint, args.render_episodes)
 
 
 if __name__ == "__main__":
