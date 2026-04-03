@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> None:
     policy = make_policy(_env, hidden_size=args.hidden_size).to(args.device)
     _env.close()
 
-    ckpt = torch.load(str(ckpt_path), map_location=args.device, weights_only=True)
+    ckpt = torch.load(str(ckpt_path), map_location=args.device, weights_only=False)
     policy.load_state_dict(ckpt["policy_state_dict"])
     global_step = ckpt.get("global_step", 0)
     print(f"Loaded checkpoint: {ckpt_path}  (global_step={global_step})")
